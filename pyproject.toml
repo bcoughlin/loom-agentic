@@ -30,7 +30,7 @@ replay-s3 = ["boto3>=1.28"]
 dev = ["pytest>=7", "langgraph>=0.2", "boto3>=1.28"]
 
 [project.urls]
-Repository = "https://github.com/bradcoughlin/loom-agentic"
+Repository = "https://github.com/bcoughlin/loom-agentic"
 
 [tool.hatch.build.targets.wheel]
 packages = ["loom_agentic"]
