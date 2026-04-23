@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  Loom Replay Player — self-contained HTML viewer for a single agent run.
+
+  Consumes a JSON document matching loom_agentic.replay.serialize_run():
+    { run_id, agent, mermaid, frames: [{idx, ts, active_node, active_edge, ...}] }
+
+  Loading strategy, in order of preference:
+    1. window.LOOM_RUN_JSON  — host injects the JSON object directly
+    2. ?src=<url>             — fetch JSON from that URL (needs CORS)
+    3. ?run=<run_id>&api=<base> — fetch `${api}/runs/${run_id}` (for Powra admin)
+    4. drag-and-drop a .json file onto the page
+
+  Zero build step, no npm, no framework. Mermaid loaded from CDN.
+-->
+<head>
+<meta charset="utf-8">
+<title>Loom Replay</title>
+<style>
+  :root {
+    --bg:        #0e0e18;
+    --bg-panel:  #13131f;
+    --border:    #1e1e2e;
+    --text:      #e8e8f0;
+    --muted:     #666;
+    --accent:    #c084fc;
+    --active:    #ef4444;
+    --edge:      #f59e0b;
+    --ok:        #22c55e;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-monospace, monospace; height: 100%; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 16px; align-items: baseline; }
+  header .title { font-weight: 600; color: var(--accent); }
+  header .meta { color: var(--muted); font-size: 12px; }
+  main { flex: 1; display: grid; grid-template-columns: 2fr 1fr; min-height: 0; }
+  .graph { padding: 16px; overflow: auto; display: flex; align-items: center; justify-content: center; }
+  .graph svg { max-width: 100%; height: auto; }
+  .log { border-left: 1px solid var(--border); overflow-y: auto; padding: 8px 0; display: flex; flex-direction: column; }
+  .log-row { padding: 8px 12px; border-bottom: 1px solid #1a1a2a; cursor: pointer; font-size: 12px; line-height: 1.4; }
+  .log-row.active { background: #1a1a2e; border-left: 3px solid var(--accent); padding-left: 9px; }
+  .log-row .ts { color: var(--muted); font-size: 10px; }
+  .log-row .summary { color: var(--text); margin-top: 2px; }
+  .log-row.tool-end .summary { color: var(--ok); }
+  .log-row.tool-start .summary { color: var(--edge); }
+
+  /* Highlighting rules applied to the Mermaid-rendered SVG */
+  .mermaid-host .node.active rect,
+  .mermaid-host .node.active polygon,
+  .mermaid-host .node.active circle {
+    stroke: var(--active) !important;
+    stroke-width: 3px !important;
+    filter: drop-shadow(0 0 8px var(--active));
+  }
+  .mermaid-host .edge-path.active path,
+  .mermaid-host .edgePath.active path {
+    stroke: var(--edge) !important;
+    stroke-width: 3px !important;
+  }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 10px 16px; display: flex; gap: 12px; align-items: center;
+    background: #0b0b14;
+  }
+  footer button { background: #1a1a2e; color: var(--text); border: 1px solid var(--border); padding: 6px 12px; cursor: pointer; font-family: inherit; border-radius: 4px; }
+  footer button:hover { background: #26263a; }
+  footer button:disabled { opacity: 0.4; cursor: not-allowed; }
+  footer .scrubber { flex: 1; }
+  footer .scrubber input { width: 100%; }
+  footer .counter { color: var(--muted); font-size: 12px; min-width: 80px; text-align: right; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .dropzone { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; font-size: 24px; color: var(--accent); border: 2px dashed var(--accent); z-index: 1000; }
+  .dropzone.active { display: flex; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">🧵 Loom Replay</span>
+  <span class="meta" id="meta"></span>
+</header>
+<main>
+  <div class="graph mermaid-host" id="graph">
+    <div class="empty">Loading…</div>
+  </div>
+  <div class="log" id="log"></div>
+</main>
+<footer>
+  <button id="prev">◀ Prev</button>
+  <button id="play">▶ Play</button>
+  <button id="next">Next ▶</button>
+  <div class="scrubber">
+    <input type="range" id="scrub" min="0" max="0" value="0" step="1">
+  </div>
+  <span class="counter" id="counter">0 / 0</span>
+</footer>
+<div class="dropzone" id="dropzone">Drop a run .json file anywhere</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+(async function () {
+  mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose', flowchart: { curve: 'linear' } });
+
+  const graphEl  = document.getElementById('graph');
+  const logEl    = document.getElementById('log');
+  const metaEl   = document.getElementById('meta');
+  const scrubEl  = document.getElementById('scrub');
+  const counterEl= document.getElementById('counter');
+  const prevBtn  = document.getElementById('prev');
+  const nextBtn  = document.getElementById('next');
+  const playBtn  = document.getElementById('play');
+  const dropzone = document.getElementById('dropzone');
+
+  let run = null, frames = [], nodeMap = new Map(), edgeMap = new Map();
+  let cursor = 0, playing = false, playTimer = null;
+
+  async function loadRun(data) {
+    run = data;
+    frames = run.frames || [];
+    cursor = 0;
+    metaEl.textContent = `${run.agent || '?'} · ${run.run_id?.slice(0, 8) || '?'} · ${frames.length} frames · ${run.duration_ms || 0}ms`;
+    document.title = `Loom · ${run.agent || 'run'}`;
+
+    // Render the Mermaid, then build id → SVG element maps
+    graphEl.innerHTML = '<div class="empty">Rendering…</div>';
+    const { svg } = await mermaid.render('loom-graph', run.mermaid || 'flowchart TD\n    START --> END');
+    graphEl.innerHTML = svg;
+    buildMaps();
+
+    // Log panel
+    logEl.innerHTML = '';
+    frames.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'log-row' + (f.tool_name && f.tool_output ? ' tool-end' : f.tool_name ? ' tool-start' : '');
+      row.dataset.idx = i;
+      row.innerHTML = `<div class="ts">${formatTs(f.ts)} #${i + 1}</div><div class="summary"></div>`;
+      row.querySelector('.summary').textContent = f.summary || '';
+      row.onclick = () => seek(i);
+      logEl.appendChild(row);
+    });
+
+    scrubEl.max = Math.max(0, frames.length - 1);
+    scrubEl.value = 0;
+    render();
+  }
+
+  function buildMaps() {
+    nodeMap.clear(); edgeMap.clear();
+    // Mermaid output: each node is <g class="node" id="flowchart-agent-123">…</g>
+    graphEl.querySelectorAll('g.node').forEach(g => {
+      const id = g.id || '';
+      const m = id.match(/^flowchart-(.+?)-\d+$/);
+      if (m) nodeMap.set(m[1], g);
+    });
+    graphEl.querySelectorAll('g.edgePaths > g, g.edgePath').forEach(g => {
+      const id = g.id || '';
+      // ids look like L_source_target_0
+      const m = id.match(/^L_(.+?)_(.+?)(?:_\d+)?$/);
+      if (m) edgeMap.set(`${m[1]}>${m[2]}`, g);
+    });
+  }
+
+  function clearHighlights() {
+    nodeMap.forEach(el => el.classList.remove('active'));
+    edgeMap.forEach(el => el.classList.remove('active'));
+  }
+
+  function applyHighlight(frame) {
+    clearHighlights();
+    if (frame.active_node && nodeMap.has(frame.active_node)) {
+      nodeMap.get(frame.active_node).classList.add('active');
+    }
+    if (frame.active_edge) {
+      const key = `${frame.active_edge[0]}>${frame.active_edge[1]}`;
+      if (edgeMap.has(key)) edgeMap.get(key).classList.add('active');
+    }
+  }
+
+  function render() {
+    if (!frames.length) return;
+    const frame = frames[cursor];
+    applyHighlight(frame);
+    scrubEl.value = cursor;
+    counterEl.textContent = `${cursor + 1} / ${frames.length}`;
+    [...logEl.children].forEach((row, i) => {
+      row.classList.toggle('active', i === cursor);
+      if (i === cursor) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+    prevBtn.disabled = cursor === 0;
+    nextBtn.disabled = cursor >= frames.length - 1;
+  }
+
+  function seek(i) { cursor = Math.max(0, Math.min(frames.length - 1, i)); render(); }
+  function step(d) { seek(cursor + d); }
+
+  function togglePlay() {
+    playing = !playing;
+    playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+    if (playTimer) clearInterval(playTimer);
+    if (playing) {
+      playTimer = setInterval(() => {
+        if (cursor >= frames.length - 1) { togglePlay(); return; }
+        step(1);
+      }, 700);
+    }
+  }
+
+  prevBtn.onclick = () => step(-1);
+  nextBtn.onclick = () => step(1);
+  playBtn.onclick = togglePlay;
+  scrubEl.oninput = e => seek(parseInt(e.target.value, 10));
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft')  step(-1);
+    if (e.key === 'ArrowRight') step(1);
+    if (e.key === ' ')          { e.preventDefault(); togglePlay(); }
+  });
+
+  // Drag-and-drop load
+  ['dragenter', 'dragover'].forEach(ev => {
+    document.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('active'); });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    document.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('active'); });
+  });
+  document.addEventListener('drop', async e => {
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    loadRun(JSON.parse(text));
+  });
+
+  // ── Entry point ────────────────────────────────────────────────────────
+  const params = new URLSearchParams(location.search);
+  if (window.LOOM_RUN_JSON) {
+    await loadRun(window.LOOM_RUN_JSON);
+  } else if (params.get('src')) {
+    const data = await fetch(params.get('src'), { credentials: 'include' }).then(r => r.json());
+    await loadRun(data);
+  } else if (params.get('run') && params.get('api')) {
+    const api = params.get('api').replace(/\/+$/, '');
+    const data = await fetch(`${api}/runs/${params.get('run')}`, { credentials: 'include' }).then(r => r.json());
+    await loadRun(data);
+  } else {
+    graphEl.innerHTML = '<div class="empty">Drop a run .json file, or pass ?src=url / ?run=id&api=base</div>';
+    metaEl.textContent = 'no run loaded';
+  }
+
+  function formatTs(iso) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+    } catch { return iso; }
+  }
+})();
+</script>
+</body>
+</html>
