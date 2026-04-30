@@ -4,8 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loom-agentic"
-version = "0.0.1"
+version = "0.0.2"
 description = "Visual agent orchestration + observability for LangGraph"
+dependencies = [
+    "pyyaml>=6.0",
+]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

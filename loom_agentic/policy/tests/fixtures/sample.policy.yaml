@@ -1,0 +1,28 @@
+version: "v1"
+globals:
+  - "Never invent coordinates — every box must come from a real detection."
+  - "If user asks a question, the next assistant turn answers it."
+nodes:
+  orient:
+    prompt: |
+      Read the user's most recent message. Identify their intent in one sentence.
+      Then check whether you have an open question from a prior turn.
+  resolve_thread:
+    prompt: |
+      The user's reply IS the answer to your prior question. Use it to derive
+      an alias or finalize the decision; do NOT pivot to a new investigation.
+  awaiting_user_answer:
+    prompt: |
+      Phrase the question concretely. Wait for reply before any further tool calls.
+  answer:
+    prompt: |
+      Compose a direct answer in plain language. No preamble, no propose_bind.
+edges:
+  "route->resolve_thread":
+    when: "has_open_question is true"
+    prompt: |
+      Acknowledge the user's reply, then transition straight to proposing.
+  "classify_match->answer":
+    when: "score >= 0.85"
+    prompt: |
+      STRONG match — just answer. Do not propose anything.

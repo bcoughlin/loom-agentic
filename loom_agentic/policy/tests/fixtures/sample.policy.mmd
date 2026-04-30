@@ -1,0 +1,18 @@
+flowchart TD
+    START([start]) --> orient
+    orient[Orient on user intent] --> route
+    route{has_open_question?}
+    route -->|yes| resolve_thread
+    route -->|no| pick_target
+    resolve_thread[Use the user's answer] --> proposing
+    pick_target[Pick a target] --> detecting
+    detecting[Run detection] --> identifying
+    identifying[Check the library] --> classify_match
+    classify_match{match_strength?}
+    classify_match -->|strong| answer
+    classify_match -->|likely| proposing_bind
+    classify_match -->|weak| awaiting_user_answer
+    awaiting_user_answer[Ask user to clarify] --> END([end])
+    proposing[Propose new exemplar] --> END
+    proposing_bind[Propose bind] --> END
+    answer[Answer in plain language] --> END

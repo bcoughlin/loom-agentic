@@ -5,6 +5,13 @@ Public API:
     from loom_agentic.orchestrate.ir import Graph, Node, Edge
     from loom_agentic.orchestrate.mermaid_parser import parse_mermaid
 
+The mermaid parser + IR are pure-Python and import cheap. The graph_builder
+imports langgraph (a heavy dependency); to keep `policy` and other submodules
+usable without langgraph installed, we lazy-load the builder symbols via
+PEP 562 module __getattr__. Behaviour from the caller's perspective is
+unchanged — `from loom_agentic.orchestrate import build_from_mermaid` still
+works, it just defers the langgraph import until first access.
+
 Example:
     MERMAID = '''
     flowchart TD
@@ -28,7 +35,6 @@ Example:
     result = app.invoke({"input": "hello"})
 """
 
-from .graph_builder import RegistryError, build_from_ir, build_from_mermaid
 from .ir import Edge, Graph, Node
 from .mermaid_parser import MermaidParseError, parse_mermaid
 
@@ -42,3 +48,17 @@ __all__ = [
     "build_from_mermaid",
     "parse_mermaid",
 ]
+
+
+_LAZY = {"build_from_ir", "build_from_mermaid", "RegistryError"}
+
+
+def __getattr__(name):
+    if name in _LAZY:
+        from .graph_builder import RegistryError, build_from_ir, build_from_mermaid
+        return {
+            "RegistryError":      RegistryError,
+            "build_from_ir":      build_from_ir,
+            "build_from_mermaid": build_from_mermaid,
+        }[name]
+    raise AttributeError(f"module 'loom_agentic.orchestrate' has no attribute {name!r}")

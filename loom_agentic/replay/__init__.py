@@ -105,6 +105,8 @@ def _frame_dict(f: Frame) -> dict:
         "summary":     f.summary,
         "kind":        f.event.get("event") if isinstance(f.event, dict) else None,
         "rejected":    f.rejected,
+        "reported_node_id":   f.reported_node_id,
+        "reported_rationale": f.reported_rationale,
     }
 
 

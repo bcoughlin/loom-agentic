@@ -26,7 +26,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-STORY_EVENTS = {"on_chat_model_end", "on_tool_start", "on_tool_end"}
+STORY_EVENTS = {
+    "on_chat_model_end", "on_tool_start", "on_tool_end",
+    # Loom-policy event vocabulary — emitted by loom_agentic.eventlog.EventWriter
+    # for non-LangGraph runtimes (e.g. kepler's custom Anthropic SDK loop).
+    # When present, on_position_report drives `active_node` from the agent's
+    # self-reported position rather than from the inferred ReAct topology.
+    "on_position_report",
+}
 
 # Nodes we highlight in the canonical ReAct graph. Names match what
 # `create_react_agent` uses internally; `__start__` / `__end__` match the
@@ -54,6 +61,13 @@ class Frame:
     # "tool errored" — a rejection is a policy course-correction, not a
     # crash, and the agent will retry on the next turn.
     rejected:     bool        = False
+    # The agent's self-reported position for this frame — set when an
+    # on_position_report event drove the frame, OR when a tool frame
+    # inherited the most-recent position report. Distinct from
+    # `active_node` (which may be inferred from the ReAct topology):
+    # a non-None reported_node_id means this was authored, not guessed.
+    reported_node_id: str | None = None
+    reported_rationale: str | None = None
 
 
 def frames_for_run(events: list[dict]) -> list[Frame]:
@@ -136,6 +150,15 @@ def frames_for_run(events: list[dict]) -> list[Frame]:
                 "error_message": ev.get("error_message", ""),
             }
 
+    # Track the most-recent on_position_report so subsequent tool frames
+    # can inherit it. This is what lets us distinguish "agent reported it
+    # was at node X then called tool Y" (authored) from "tool Y just fired
+    # with no report" (inferred). The rolling state resets only on the
+    # next position_report — within a single turn the agent typically
+    # reports once and then issues the actual tool call(s).
+    last_reported_node: str | None = None
+    last_reported_rationale: str | None = None
+
     for ev in events:
         etype = ev.get("event") or ""
         if etype not in STORY_EVENTS:
@@ -143,6 +166,25 @@ def frames_for_run(events: list[dict]) -> list[Frame]:
 
         idx = len(frames)
         ts  = ev.get("ts", "")
+
+        if etype == "on_position_report":
+            node_id = ev.get("node_id") or ev.get("payload", {}).get("node_id") or "?"
+            rationale = (
+                ev.get("rationale")
+                or ev.get("payload", {}).get("rationale")
+                or ""
+            )
+            last_reported_node = node_id
+            last_reported_rationale = rationale
+            frames.append(Frame(
+                idx=idx, ts=ts,
+                active_node=node_id,
+                summary=f"\U0001f4cd {node_id} · {rationale}" if rationale else f"\U0001f4cd {node_id}",
+                event=ev,
+                reported_node_id=node_id,
+                reported_rationale=rationale,
+            ))
+            continue
 
         if etype == "on_chat_model_end":
             tool_calls = ev.get("tool_calls") or []
@@ -176,19 +218,23 @@ def frames_for_run(events: list[dict]) -> list[Frame]:
             # Full args json — UI truncates for display when collapsed.
             import json as _json
             args_str = _json.dumps(tool_args, default=str) if tool_args else ""
+            # If the agent recently reported its position via on_position_report,
+            # anchor the highlight to THAT node — this is the authored-policy
+            # signal. The edge runs from the reported node into the tool's
+            # node so reviewers see "agent at <reported> ➜ called <tool>".
+            # Without a reported position, fall back to the ReAct topology
+            # (agent -> tool) so existing LangGraph runs render unchanged.
+            anchor_node = last_reported_node or REACT_AGENT_NODE
             frames.append(Frame(
                 idx=idx, ts=ts,
                 active_node=_safe_id(tool),
-                # Keep the agent->tool edge lit while the tool is running, so
-                # the replay visibly shows which branch the agent just took
-                # in between on_chat_model_end (emitted the call) and
-                # on_tool_end (tool returned). Without this, the node turns
-                # green but the connecting arrow goes dark.
-                active_edge=(REACT_AGENT_NODE, _safe_id(tool)),
+                active_edge=(_safe_id(anchor_node), _safe_id(tool)),
                 tool_name=tool,
                 tool_args=tool_args,
                 summary=f"\U0001f527 {tool}({args_str})",
                 event=ev,
+                reported_node_id=last_reported_node,
+                reported_rationale=last_reported_rationale,
             ))
 
         elif etype == "on_tool_end":
@@ -217,15 +263,20 @@ def frames_for_run(events: list[dict]) -> list[Frame]:
                 ok_icon = "\u274c"
             else:
                 ok_icon = "\u2705"
+            # On tool return, edge points back to whatever was anchoring
+            # the call \u2014 reported node if available, agent otherwise.
+            anchor_node = last_reported_node or REACT_AGENT_NODE
             frames.append(Frame(
                 idx=idx, ts=ts,
                 active_node=_safe_id(tool),
-                active_edge=(_safe_id(tool), REACT_AGENT_NODE),
+                active_edge=(_safe_id(tool), _safe_id(anchor_node)),
                 tool_name=tool,
                 tool_output=output,
                 summary=f"{ok_icon} {tool} \u2192 {output}",
                 rejected=is_rejected,
                 event=ev,
+                reported_node_id=last_reported_node,
+                reported_rationale=last_reported_rationale,
             ))
 
     # Frames came from two passes (synthetic markers first, then
