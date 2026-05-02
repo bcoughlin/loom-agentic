@@ -303,3 +303,99 @@ corrected in real time — not just "the run went green eventually."
 | Pill turns red (off_policy) | Claude invented a `node_id` not in the YAML vocabulary. Either add the missing node or tighten existing snippets so Claude sees where to route. |
 | Agent inside a resumed thread keeps doing what it did before policy change | Policy change was YAML-only; sha didn't change; no barrier fired. Make a structural change or manually bump by editing the mermaid. |
 | `FileNotFoundError: policy '...'` at cold start | Deploy didn't include the `.mmd` or `.yaml` in the package. |
+
+---
+
+## Web UI module — `loom_agentic/web/` and `loom_agentic.serve`
+
+Loom ships a React-based admin UI as a sibling module to the Python
+package. Two consumption modes coexist; both build from the same
+component source.
+
+### Mode 1 — standalone admin app via `loom_agentic.serve`
+
+`serve.py` is a FastAPI server that mounts the built React app at `/`
+and exposes JSON endpoints reading from configured event logs.
+
+```bash
+pip install 'loom-agentic[web]'        # adds fastapi + uvicorn
+cd web/ && npm install && npm run build  # one-time SPA build → dist/
+
+LOOM_EVENTLOG_PATH=/path/to/events.jsonl python -m loom_agentic.serve
+# → http://127.0.0.1:5174
+```
+
+**Environment variables:**
+
+| Var | Default | Purpose |
+|---|---|---|
+| `LOOM_EVENTLOG_PATH` | (none) | JSONL path, comma-list, or glob. Server returns empty `runs` if unset, not an error. |
+| `LOOM_BIND_HOST` | `127.0.0.1` | Loopback by default. Bind to `0.0.0.0` only behind your own auth layer (no auth ships in the server). |
+| `LOOM_BIND_PORT` | `5174` | |
+
+**API endpoints:**
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/health` | `{ok, eventlog_paths, web_dist_built}` |
+| `GET /api/runs?hours=N&agent=X&limit=N` | `{runs: [serialize_run_listing(r), ...], count}` |
+| `GET /api/runs/{run_id}` | `serialize_run(r)` — full frames + mermaid |
+| `GET /api/agents` | `{agents: [...]}` distinct agent names from configured logs |
+
+The React app routes (`/replay`, `/sessions`, `/scorecards`) fall
+through to `index.html` so client-side BrowserRouter can take over.
+
+### Mode 2 — component library via `loom-web` npm package
+
+The same components ship as a consumable ESM library for other React
+apps to import. No source-file forking; consumers control React +
+mermaid versions via peer dependencies.
+
+```bash
+cd web/ && npm run build:lib   # produces dist-lib/loom-web.js
+```
+
+```json
+// consumer-app/package.json
+{
+  "dependencies": {
+    "loom-web": "file:../path/to/loom_agentic/web"
+  },
+  "peerDependencies": {
+    "react": "^18", "react-dom": "^18",
+    "react-router-dom": "^6", "mermaid": "^11"
+  }
+}
+```
+
+```jsx
+import { LoomPlayer, AdminNav } from 'loom-web'
+
+<AdminNav wordmark="MY APP"
+          routes={[{path:'/runs', label:'Runs'}]} />
+<LoomPlayer run={runJson} onReload={() => fetch(...)} />
+```
+
+Currently exported: **`LoomPlayer`**, **`AdminNav`**. Page-level views
+(`Replay`, `Sessions`, `Scorecards`) are NOT exported — pages are
+app-specific composition. See `web/README.md` for the full guide.
+
+### When to use which mode
+
+- **Standalone (Mode 1):** you want loom's admin UI as-is, self-hosted.
+  Open the URL, browse runs, no React app on your end.
+- **Library (Mode 2):** you have your own React app and want loom's
+  components composed into it (e.g. `powra-mobile-app` consumes loom's
+  `LoomPlayer` inside its own admin pages).
+
+### What's NOT in the web module yet
+
+- Sessions list + detail (plan_3 step 5 — placeholder page exists)
+- Scorecard views (plan_2 UI deliverables — placeholder page exists)
+- Live tail (polling-based refresh planned; SSE deferred)
+- Auth (consumer concern — front with reverse proxy if exposing
+  beyond localhost)
+
+The static `loom_agentic/replay/static/player.html` continues to ship
+for the zero-dependency drag-drop case. Different audience; both
+useful; no requirement to maintain feature parity.

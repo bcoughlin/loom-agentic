@@ -19,21 +19,31 @@ See [DOCS.md](DOCS.md) for the authoring guide.
 
 ```
 loom_agentic/
-├── __init__.py       ← module metadata
-├── enforcement.py    ← layer-4 enforcement primitives
-├── orchestrate/      ← Path B (Mermaid → StateGraph compiler)
-│   ├── ir.py         ← intermediate representation
-│   ├── mermaid_parser.py ← Mermaid flowchart → IR
-│   ├── graph_builder.py  ← IR → compiled LangGraph app
-│   └── tests/
-└── replay/           ← event-log → frames + mermaid synthesis
-    ├── __init__.py   ← serialize_run / serialize_run_listing
-    ├── loader.py     ← load JSONL from S3 or disk, group by invocation
-    ├── stepper.py    ← events → Frame list (what to highlight per tick)
-    ├── mermaid_for_run.py ← synthesize ReAct mermaid from events
-    ├── static/
-    │   └── player.html    ← self-contained HTML replay viewer
-    └── tests/
+├── loom_agentic/
+│   ├── __init__.py       ← module metadata
+│   ├── enforcement.py    ← layer-4 enforcement primitives
+│   ├── serve.py          ← FastAPI server: mounts web/dist + serves /api/runs
+│   ├── orchestrate/      ← Path B (Mermaid → StateGraph compiler)
+│   │   ├── ir.py         ← intermediate representation
+│   │   ├── mermaid_parser.py ← Mermaid flowchart → IR
+│   │   ├── graph_builder.py  ← IR → compiled LangGraph app
+│   │   └── tests/
+│   └── replay/           ← event-log → frames + mermaid synthesis
+│       ├── __init__.py   ← serialize_run / serialize_run_listing
+│       ├── loader.py     ← load JSONL from S3 or disk, group by invocation
+│       ├── stepper.py    ← events → Frame list (what to highlight per tick)
+│       ├── mermaid_for_run.py ← synthesize ReAct mermaid from events
+│       ├── static/
+│       │   └── player.html    ← self-contained HTML replay viewer (no build)
+│       └── tests/
+└── web/              ← React admin UI — see web/README.md
+    ├── src/
+    │   ├── components/   ← LoomPlayer, AdminNav (npm-exportable)
+    │   ├── pages/        ← Replay, Sessions, Scorecards
+    │   └── index.js      ← library entry — `import { LoomPlayer } from 'loom-web'`
+    ├── vite.config.js        ← SPA build → dist/
+    ├── vite.config.lib.js    ← library build → dist-lib/
+    └── package.json      ← peer deps: react, react-dom, react-router-dom, mermaid
 ```
 
 ---
@@ -49,6 +59,7 @@ Optional dependencies:
 ```bash
 pip install loom-agentic[orchestrate]   # adds langgraph
 pip install loom-agentic[replay-s3]     # adds boto3 for S3 event loading
+pip install loom-agentic[web]           # adds fastapi + uvicorn for serve.py
 ```
 
 ---
@@ -119,6 +130,52 @@ for run in runs[:5]:
 
 Open `loom_agentic/replay/static/player.html` in a browser and drag-drop
 the JSON, or inject it via `window.LOOM_RUN_JSON`.
+
+---
+
+## Web UI — two consumption modes
+
+Loom ships a React-based admin surface in `web/`. Two ways to use it:
+
+### Standalone admin app (via `serve.py`)
+
+`loom_agentic.serve` mounts the built React app and serves `/api/runs`,
+`/api/runs/{id}`, `/api/agents`, `/api/health` from configured event logs.
+
+```bash
+# One-time: install web deps + build the SPA
+pip install 'loom-agentic[web]'
+cd web && npm install && npm run build
+
+# Run, pointing at your event log(s) — single path, comma list, or glob
+LOOM_EVENTLOG_PATH=/path/to/events.jsonl python -m loom_agentic.serve
+# → http://127.0.0.1:5174
+```
+
+Open the URL — Replay (functional), Sessions and Scorecards (placeholders
+landing in plan_3 step 5 and plan_2's UI deliverables respectively).
+
+### Component library (other React projects)
+
+The same components ship as a consumable npm package. Other React apps
+import `LoomPlayer` and `AdminNav` directly without forking source files.
+
+```json
+// consumer-app/package.json
+{ "dependencies": { "loom-web": "file:../path/to/loom_agentic/web" } }
+```
+
+```jsx
+import { LoomPlayer, AdminNav } from 'loom-web'
+
+<AdminNav wordmark="MY APP" routes={[{path:'/foo', label:'Foo'}]} />
+<LoomPlayer run={runJson} />
+```
+
+React, react-dom, react-router-dom, and mermaid are peer dependencies —
+consumers control the versions, no duplicate React instances.
+
+See `web/README.md` for the full guide on both modes.
 
 ---
 
